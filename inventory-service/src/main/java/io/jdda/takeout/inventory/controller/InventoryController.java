@@ -1,6 +1,6 @@
-package io.jdda.takeout.inventory.api;
+package io.jdda.takeout.inventory.controller;
 
-import io.jdda.takeout.inventory.application.ReservationService;
+import io.jdda.takeout.inventory.service.ReservationService;
 import io.jdda.takeout.inventory.domain.StockContracts.ApiError;
 import io.jdda.takeout.inventory.domain.StockContracts.ReservationRequest;
 import io.jdda.takeout.inventory.domain.StockContracts.StockView;
@@ -19,11 +19,11 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
-public class InventoryApi {
+public class InventoryController {
 
     private final ReservationService reservationService;
 
-    public InventoryApi(ReservationService reservationService) {
+    public InventoryController(ReservationService reservationService) {
         this.reservationService = reservationService;
     }
 
