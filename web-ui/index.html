@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>巷口食堂 · 家常中餐</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<a class="skip-link" href="#menu">跳到菜单</a>
+
+<header class="hero">
+  <div class="hero-inner">
+    <div class="hero-copy">
+      <p class="hero-eyebrow">巷口食堂 · 街坊家常味</p>
+      <h1>一碗热饭，<br>暖到巷口。</h1>
+      <p class="hero-sub">每日现炒，慢火炖汤。下单后到店自取，热乎带回家。</p>
+      <a class="hero-cta" href="#menu">看看今天吃什么</a>
+    </div>
+    <div class="hero-art" aria-hidden="true">
+      <svg viewBox="0 0 320 320" role="img" aria-label="一碗热腾腾的面">
+        <defs>
+          <linearGradient id="bowlGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#f6efe2"/>
+            <stop offset="1" stop-color="#e6d8c0"/>
+          </linearGradient>
+          <linearGradient id="soupGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#d98a3d"/>
+            <stop offset="1" stop-color="#b5651d"/>
+          </linearGradient>
+        </defs>
+        <ellipse cx="160" cy="250" rx="120" ry="22" fill="rgba(0,0,0,0.12)"/>
+        <path d="M40 150 Q160 320 280 150 Z" fill="url(#bowlGrad)" stroke="#c9b79a" stroke-width="3"/>
+        <ellipse cx="160" cy="150" rx="120" ry="34" fill="url(#soupGrad)"/>
+        <ellipse cx="160" cy="150" rx="104" ry="26" fill="#c9762b"/>
+        <path d="M90 150 q20 -18 40 0 q20 18 40 0 q20 -18 40 0" fill="none" stroke="#f3e2c4" stroke-width="6" stroke-linecap="round"/>
+        <path d="M100 138 q18 -14 36 0 q18 14 36 0 q18 -14 36 0" fill="none" stroke="#f3e2c4" stroke-width="5" stroke-linecap="round"/>
+        <circle cx="120" cy="140" r="9" fill="#7a9a4a"/>
+        <circle cx="200" cy="142" r="8" fill="#7a9a4a"/>
+        <circle cx="160" cy="132" r="7" fill="#c0392b"/>
+        <path d="M210 60 L250 130" stroke="#8a6a3a" stroke-width="7" stroke-linecap="round"/>
+        <path d="M230 55 L268 122" stroke="#8a6a3a" stroke-width="7" stroke-linecap="round"/>
+      </svg>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="menu-section" id="menu" aria-labelledby="menu-heading">
+    <div class="section-head">
+      <h2 id="menu-heading">今日菜单</h2>
+      <p class="section-sub">库存实时更新，售完即止。</p>
+    </div>
+    <div id="menu-status" class="state-line" role="status" aria-live="polite"></div>
+    <ul id="menu-list" class="menu-grid" aria-label="菜单列表"></ul>
+  </section>
+
+  <section class="cart-section" aria-labelledby="cart-heading">
+    <div class="section-head">
+      <h2 id="cart-heading">我的餐篮</h2>
+    </div>
+    <div id="cart" class="cart-panel" data-testid="cart" aria-live="polite">
+      <p class="cart-empty">餐篮还是空的，挑几样喜欢的吧。</p>
+    </div>
+    <div class="cart-actions">
+      <button id="place-order" class="btn btn-primary" data-testid="place-order" type="button" disabled>下单</button>
+      <p id="order-feedback" class="feedback" role="status" aria-live="polite"></p>
+    </div>
+  </section>
+
+  <section class="order-section" aria-labelledby="order-heading">
+    <div class="section-head">
+      <h2 id="order-heading">订单查询</h2>
+      <p class="section-sub">输入订单号查看进度，或取消未完成的订单。</p>
+    </div>
+    <form id="lookup-form" class="lookup-form" novalidate>
+      <label for="order-id-input" class="visually-hidden">订单号</label>
+      <input id="order-id-input" data-testid="order-id" type="text" inputmode="text" autocomplete="off" placeholder="粘贴订单号（UUID）" aria-describedby="lookup-hint">
+      <button id="lookup-order" data-testid="lookup-order" class="btn btn-secondary" type="submit">查询订单</button>
+    </form>
+    <p id="lookup-hint" class="hint">订单号形如 3f2a1c9e-… 的 36 位字符。</p>
+    <div id="order-panel" class="order-panel" hidden>
+      <div class="order-head">
+        <span class="order-label">当前状态</span>
+        <span id="order-status" data-testid="order-status" class="status-badge">—</span>
+      </div>
+      <p id="order-id-display" class="order-id-line"></p>
+      <ul id="order-items" class="order-items"></ul>
+      <p id="order-total" class="order-total"></p>
+      <button id="cancel-order" data-testid="cancel-order" class="btn btn-danger" type="button" hidden>取消订单</button>
+      <p id="order-feedback" class="feedback" role="status" aria-live="polite"></p>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <p>巷口食堂 · 到店自取 · 营业时间 11:00–21:00</p>
+</footer>
+
+<script src="/app.js" defer></script>
+</body>
+</html>
