@@ -49,7 +49,7 @@ public CreateResult create(String idempotencyKey, CreateOrderRequest request) {
     validate(idempotencyKey, request);
     String customerId = request.customerId();
     String requestHash = hash(request.items());
-    OrderResponse existing = findOrder(customerId, idempotencyKey);
+    OrderResponse existing = findOrder(customerId, idempotencyKey, requestHash);
     if (existing != null) {
         return new CreateResult(existing, false);
     }
@@ -66,7 +66,7 @@ public CreateResult create(String idempotencyKey, CreateOrderRequest request) {
         if (!requestHash.equals(intent.requestHash())) {
             throw OrderProblem.idempotencyConflict();
         }
-        OrderResponse replay = findOrder(customerId, idempotencyKey);
+        OrderResponse replay = findOrder(customerId, idempotencyKey, requestHash);
         if (replay != null) {
             return new CreateResult(replay, false);
         }
@@ -91,11 +91,11 @@ public CreateResult create(String idempotencyKey, CreateOrderRequest request) {
                 orderId, customerId, idempotencyKey, requestHash, total);
         for (OrderItemResponse snapshot : snapshots) {
             jdbc.update("INSERT INTO order_line(order_id, menu_item_id, item_name, unit_price_cents, quantity) VALUES (?, ?, ?, ?, ?)",
-                    orderId, snapshot.menuItemId(), snapshot.name(), snapshot.priceCents(), snapshot.quantity());
+                    orderId, snapshot.menuItemId(), snapshot.name(), snapshot.unitPriceCents(), snapshot.quantity());
         }
         jdbc.update("INSERT INTO outbox_event(event_id, order_id) VALUES (?, ?)", UUID.randomUUID(), orderId);
         jdbc.update("UPDATE order_intent SET status = ? WHERE id = ?", STATUS_COMPLETED, intent.id());
-        OrderResponse response = new OrderResponse(orderId, customerId, "PENDING", total, snapshots);
+        OrderResponse response = loadOrder(orderId);
         return new CreateResult(response, true);
     });
 }
@@ -117,7 +117,7 @@ public OrderResponse cancel(UUID id) {
         if ("CANCELLED".equals(current)) {
             return Boolean.FALSE;
         }
-        jdbc.update("UPDATE takeout_order SET status = 'CANCELLED', updated_at = clock_timestamp() WHERE id = ?", id);
+        jdbc.update("UPDATE takeout_order SET status = 'CANCELLED', cancelled_at = clock_timestamp() WHERE id = ?", id);
         jdbc.update("INSERT INTO order_release_retry(order_id, completed, created_at, updated_at) VALUES (?, FALSE, clock_timestamp(), clock_timestamp()) ON CONFLICT(order_id) DO NOTHING", id);
         return Boolean.TRUE;
     });
@@ -221,11 +221,21 @@ private void validate(String idempotencyKey, CreateOrderRequest request) {
         }
     }
 
-    private OrderResponse findOrder(String customerId, String requestKey) {
-        List<UUID> ids = jdbc.query(
-                "select id from takeout_order where customer_id = ? and request_key = ?",
-                (rs, i) -> rs.getObject("id", UUID.class), customerId, requestKey);
-        return ids.isEmpty() ? null : loadOrder(ids.get(0));
+    private OrderResponse findOrder(String customerId, String requestKey, String requestHash) {
+        List<Object[]> rows = jdbc.query(
+                "SELECT id, request_hash FROM takeout_order WHERE customer_id = ? AND request_key = ?",
+                (rs, rowNum) -> new Object[]{rs.getObject("id", UUID.class), rs.getString("request_hash")},
+                customerId, requestKey);
+        if (rows.isEmpty()) {
+            return null;
+        }
+        Object[] row = rows.get(0);
+        UUID orderId = (UUID) row[0];
+        String storedHash = (String) row[1];
+        if (!java.util.Objects.equals(storedHash, requestHash)) {
+            throw OrderProblem.idempotencyConflict();
+        }
+        return loadOrder(orderId);
     }
 
     private OrderResponse loadOrder(UUID id) {
