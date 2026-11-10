@@ -1,4 +1,4 @@
-package io.jdda.takeout.menu.application;
+package io.jdda.takeout.menu.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -8,31 +8,28 @@ import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.jdbc.core.JdbcTemplate;
+import io.jdda.takeout.menu.mapper.MenuMapper;
 import org.springframework.stereotype.Service;
 
 @Service
-public class MenuCatalog {
+public class MenuService {
 
-    private static final Logger log = LoggerFactory.getLogger(MenuCatalog.class);
+    private static final Logger log = LoggerFactory.getLogger(MenuService.class);
 
     static final String CACHE_KEY = "takeout:menu:v1";
     static final Duration CACHE_TTL = Duration.ofSeconds(120);
 
-    private static final String SELECT_MENU =
-            "SELECT id, name, price_cents FROM catalog.menu_item ORDER BY id";
-
     private static final TypeReference<List<MenuItem>> MENU_LIST_TYPE = new TypeReference<>() {
     };
 
-    private final JdbcTemplate jdbcTemplate;
+    private final MenuMapper mapper;
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
 
-    public MenuCatalog(JdbcTemplate jdbcTemplate,
+    public MenuService(MenuMapper mapper,
                        StringRedisTemplate redisTemplate,
                        ObjectMapper objectMapper) {
-        this.jdbcTemplate = jdbcTemplate;
+        this.mapper = mapper;
         this.redisTemplate = redisTemplate;
         this.objectMapper = objectMapper;
     }
@@ -77,10 +74,7 @@ public class MenuCatalog {
     }
 
     private List<MenuItem> readFromDatabase() {
-        return jdbcTemplate.query(SELECT_MENU, (rs, rowNum) -> new MenuItem(
-                rs.getLong("id"),
-                rs.getString("name"),
-                rs.getLong("price_cents")));
+        return mapper.selectCatalogItemsById();
     }
 
     public record MenuResult(List<MenuItem> items, String cacheStatus) {

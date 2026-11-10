@@ -1,6 +1,6 @@
-package io.jdda.takeout.menu.api;
+package io.jdda.takeout.menu.controller;
 
-import io.jdda.takeout.menu.application.MenuCatalog;
+import io.jdda.takeout.menu.service.MenuService;
 import io.jdda.takeout.menu.domain.MenuItem;
 import java.util.List;
 import org.springframework.http.ResponseEntity;
@@ -10,17 +10,17 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 @RequestMapping("/api/menu")
-public class MenuApi {
+public class MenuController {
 
-    private final MenuCatalog menuCatalog;
+    private final MenuService menuCatalog;
 
-    public MenuApi(MenuCatalog menuCatalog) {
+    public MenuController(MenuService menuCatalog) {
         this.menuCatalog = menuCatalog;
     }
 
     @GetMapping
     public ResponseEntity<List<MenuItem>> getMenu() {
-        MenuCatalog.MenuResult result = menuCatalog.readMenu();
+        MenuService.MenuResult result = menuCatalog.readMenu();
         return ResponseEntity.ok()
                 .header("X-Cache", result.cacheStatus())
                 .body(result.items());
