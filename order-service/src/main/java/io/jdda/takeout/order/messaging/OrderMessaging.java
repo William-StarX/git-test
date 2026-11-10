@@ -1,8 +1,7 @@
-package io.jdda.takeout;
+package io.jdda.takeout.order.messaging;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -19,13 +18,13 @@ import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.jdbc.core.JdbcTemplate;
+import io.jdda.takeout.order.mapper.OrderOutboxMapper;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import static io.jdda.takeout.OrderModels.OrderPlaced;
+import static io.jdda.takeout.order.domain.OrderModels.OrderPlaced;
 
 @Configuration
 class OrderMessaging {
@@ -49,13 +48,13 @@ class OrderMessaging {
 @Component
 class OutboxRelay {
     private static final Logger log = LoggerFactory.getLogger(OutboxRelay.class);
-    private final JdbcTemplate jdbc;
+    private final OrderOutboxMapper mapper;
     private final RabbitTemplate rabbit;
     private final TransactionTemplate transactions;
     private final ObjectMapper json;
 
-    OutboxRelay(JdbcTemplate jdbc, RabbitTemplate rabbit, TransactionTemplate transactions, ObjectMapper json) {
-        this.jdbc = jdbc;
+    OutboxRelay(OrderOutboxMapper mapper, RabbitTemplate rabbit, TransactionTemplate transactions, ObjectMapper json) {
+        this.mapper = mapper;
         this.rabbit = rabbit;
         this.transactions = transactions;
         this.json = json;
@@ -73,10 +72,7 @@ class OutboxRelay {
     }
 
     private boolean publishNext() {
-        var pending = jdbc.query("""
-                SELECT event_id, order_id FROM outbox_event WHERE published_at IS NULL
-                ORDER BY created_at, event_id LIMIT 1 FOR UPDATE SKIP LOCKED
-                """, (rs, row) -> new OrderPlaced(rs.getObject("event_id", UUID.class), rs.getObject("order_id", UUID.class)));
+        var pending = mapper.lockNextUnpublishedEventSkipLocked();
         if (pending.isEmpty()) return false;
 
         OrderPlaced event = pending.getFirst();
@@ -99,18 +95,18 @@ class OutboxRelay {
         }
 
         // A crash between the broker acknowledgement and this commit may redeliver the event.
-        jdbc.update("UPDATE outbox_event SET published_at=clock_timestamp() WHERE event_id=?", event.eventId());
+        mapper.markOutboxEventPublished(event.eventId());
         return true;
     }
 }
 
 @Component
 class OrderConfirmation {
-    private final JdbcTemplate jdbc;
+    private final OrderOutboxMapper mapper;
     private final ObjectMapper json;
 
-    OrderConfirmation(JdbcTemplate jdbc, ObjectMapper json) {
-        this.jdbc = jdbc;
+    OrderConfirmation(OrderOutboxMapper mapper, ObjectMapper json) {
+        this.mapper = mapper;
         this.json = json;
     }
 
@@ -126,19 +122,11 @@ class OrderConfirmation {
         if (event == null || event.eventId() == null || event.orderId() == null) {
             throw new AmqpRejectAndDontRequeueException("Order event has no identity.");
         }
-        boolean known = Boolean.TRUE.equals(jdbc.queryForObject("""
-                SELECT EXISTS (SELECT 1 FROM outbox_event WHERE event_id=? AND order_id=?)
-                """, Boolean.class, event.eventId(), event.orderId()));
+        boolean known = Boolean.TRUE.equals(mapper.containsMatchingOutboxEvent(event.eventId(), event.orderId()));
         if (!known) throw new AmqpRejectAndDontRequeueException("Order event does not match the outbox.");
 
-        int firstDelivery = jdbc.update("""
-                INSERT INTO processed_event (event_id, order_id) VALUES (?, ?)
-                ON CONFLICT (event_id) DO NOTHING
-                """, event.eventId(), event.orderId());
+        int firstDelivery = mapper.insertProcessedEventIfAbsent(event.eventId(), event.orderId());
         if (firstDelivery == 0) return;
-        jdbc.update("""
-                UPDATE takeout_order SET status='CONFIRMED', confirmed_at=clock_timestamp()
-                WHERE id=? AND status='PENDING'
-                """, event.orderId());
+        mapper.confirmPendingOrder(event.orderId());
     }
 }

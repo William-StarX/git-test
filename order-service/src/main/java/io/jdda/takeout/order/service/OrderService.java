@@ -1,24 +1,20 @@
-package io.jdda.takeout.order.application;
+package io.jdda.takeout.order.service;
 
-import io.jdda.takeout.OrderModels.CreateOrderRequest;
-import io.jdda.takeout.OrderModels.OrderItemRequest;
-import io.jdda.takeout.OrderModels.OrderItemResponse;
-import io.jdda.takeout.OrderModels.OrderResponse;
+import io.jdda.takeout.order.domain.OrderModels.CreateOrderRequest;
+import io.jdda.takeout.order.domain.OrderModels.OrderItemRequest;
+import io.jdda.takeout.order.domain.OrderModels.OrderItemResponse;
+import io.jdda.takeout.order.domain.OrderModels.OrderResponse;
 import io.jdda.takeout.order.client.OrderDependencies;
 import io.jdda.takeout.order.domain.OrderProblem;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.RowMapper;
+import io.jdda.takeout.order.mapper.OrderMapper.IntentRow;
+import io.jdda.takeout.order.mapper.OrderMapper.OrderKey;
+import io.jdda.takeout.order.mapper.OrderMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Timestamp;
-import java.time.Instant;
-import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -29,15 +25,13 @@ import java.util.UUID;
 public class OrderService {
 
     private static final String STATUS_OPEN = "OPEN";
-    private static final String STATUS_COMPLETED = "COMPLETED";
-    private static final String STATUS_EXPIRED = "EXPIRED";
 
-    private final JdbcTemplate jdbc;
+    private final OrderMapper mapper;
     private final TransactionTemplate tx;
     private final OrderDependencies deps;
 
-    public OrderService(JdbcTemplate jdbc, PlatformTransactionManager txManager, OrderDependencies deps) {
-        this.jdbc = jdbc;
+    public OrderService(OrderMapper mapper, PlatformTransactionManager txManager, OrderDependencies deps) {
+        this.mapper = mapper;
         this.tx = new TransactionTemplate(txManager);
         this.deps = deps;
     }
@@ -54,11 +48,9 @@ public CreateResult create(String idempotencyKey, CreateOrderRequest request) {
         return new CreateResult(existing, false);
     }
     UUID intentId = UUID.randomUUID();
-    jdbc.update("INSERT INTO order_intent(id, order_id, customer_id, request_key, request_hash, status, created_at) VALUES (?, ?, ?, ?, ?, ?, clock_timestamp()) ON CONFLICT(customer_id, request_key) DO NOTHING",
-            intentId, intentId, customerId, idempotencyKey, requestHash, STATUS_OPEN);
+    mapper.insertIntentIfAbsent(intentId, customerId, idempotencyKey, requestHash, STATUS_OPEN);
     return tx.execute(status -> {
-        List<IntentRow> rows = jdbc.query("SELECT id, order_id, request_hash, status FROM order_intent WHERE customer_id = ? AND request_key = ? FOR UPDATE",
-                INTENT_MAPPER, customerId, idempotencyKey);
+        List<IntentRow> rows = mapper.lockIntentByCustomerAndKey(customerId, idempotencyKey);
         if (rows.isEmpty()) {
             throw OrderProblem.serviceUnavailable("intent unavailable");
         }
@@ -87,20 +79,18 @@ public CreateResult create(String idempotencyKey, CreateOrderRequest request) {
             snapshots.add(new OrderItemResponse(item.menuItemId(), menuItem.name(), menuItem.priceCents(), item.quantity()));
         }
         deps.reserve(orderId, request.items());
-        jdbc.update("INSERT INTO takeout_order(id, customer_id, request_key, request_hash, status, total_cents) VALUES (?, ?, ?, ?, 'PENDING', ?)",
-                orderId, customerId, idempotencyKey, requestHash, total);
+        mapper.insertPendingOrder(orderId, customerId, idempotencyKey, requestHash, total);
         for (OrderItemResponse snapshot : snapshots) {
-            jdbc.update("INSERT INTO order_line(order_id, menu_item_id, item_name, unit_price_cents, quantity) VALUES (?, ?, ?, ?, ?)",
-                    orderId, snapshot.menuItemId(), snapshot.name(), snapshot.unitPriceCents(), snapshot.quantity());
+            mapper.insertOrderLine(orderId, snapshot);
         }
-        jdbc.update("INSERT INTO outbox_event(event_id, order_id) VALUES (?, ?)", UUID.randomUUID(), orderId);
-        jdbc.update("UPDATE order_intent SET status = ? WHERE id = ?", STATUS_COMPLETED, intent.id());
-        OrderResponse response = loadOrder(orderId);
+        mapper.insertOrderPlacedOutboxEvent(UUID.randomUUID(), orderId);
+        mapper.completeIntent(intent.id());
+        OrderResponse response = mapper.loadOrder(orderId);
         return new CreateResult(response, true);
     });
 }
     public OrderResponse get(UUID id) {
-        OrderResponse order = loadOrder(id);
+        OrderResponse order = mapper.loadOrder(id);
         if (order == null) {
             throw OrderProblem.orderNotFound();
         }
@@ -109,7 +99,7 @@ public CreateResult create(String idempotencyKey, CreateOrderRequest request) {
 
 public OrderResponse cancel(UUID id) {
     Boolean firstCancel = tx.execute(status -> {
-        List<String> statuses = jdbc.queryForList("SELECT status FROM takeout_order WHERE id = ? FOR UPDATE", String.class, id);
+        List<String> statuses = mapper.lockOrderStatus(id);
         if (statuses.isEmpty()) {
             throw OrderProblem.orderNotFound();
         }
@@ -117,8 +107,8 @@ public OrderResponse cancel(UUID id) {
         if ("CANCELLED".equals(current)) {
             return Boolean.FALSE;
         }
-        jdbc.update("UPDATE takeout_order SET status = 'CANCELLED', cancelled_at = clock_timestamp() WHERE id = ?", id);
-        jdbc.update("INSERT INTO order_release_retry(order_id, completed, created_at, updated_at) VALUES (?, FALSE, clock_timestamp(), clock_timestamp()) ON CONFLICT(order_id) DO NOTHING", id);
+        mapper.markOrderCancelled(id);
+        mapper.enqueueStockReleaseIfAbsent(id);
         return Boolean.TRUE;
     });
     if (Boolean.TRUE.equals(firstCancel)) {
@@ -132,12 +122,12 @@ public OrderResponse cancel(UUID id) {
 
 private void release(UUID orderId) {
     deps.release(orderId);
-    jdbc.update("UPDATE order_release_retry SET completed = TRUE, updated_at = clock_timestamp() WHERE order_id = ?", orderId);
+    mapper.markStockReleaseCompleted(orderId);
 }
 
 @org.springframework.scheduling.annotation.Scheduled(fixedDelay = 2000)
 public void retryReleases() {
-    List<UUID> pending = jdbc.queryForList("SELECT order_id FROM order_release_retry WHERE completed = FALSE ORDER BY created_at LIMIT 10", UUID.class);
+    List<UUID> pending = mapper.listPendingStockReleases();
     for (UUID orderId : pending) {
         try {
             release(orderId);
@@ -149,18 +139,17 @@ public void retryReleases() {
 @org.springframework.scheduling.annotation.Scheduled(fixedDelay = 60000)
 public void abandonStaleIntents() {
     tx.execute(status -> {
-        List<IntentRow> rows = jdbc.query("SELECT id, order_id, request_hash, status FROM order_intent WHERE status = ? AND created_at < clock_timestamp() - INTERVAL '10 minutes' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED",
-                INTENT_MAPPER, STATUS_OPEN);
+        List<IntentRow> rows = mapper.lockStaleIntentSkipLocked(STATUS_OPEN);
         if (rows.isEmpty()) {
             return null;
         }
         IntentRow intent = rows.get(0);
-        List<UUID> existing = jdbc.queryForList("SELECT id FROM takeout_order WHERE id = ?", UUID.class, intent.orderId());
+        List<UUID> existing = mapper.findExistingOrderId(intent.orderId());
         if (!existing.isEmpty()) {
             return null;
         }
         deps.release(intent.orderId());
-        jdbc.update("UPDATE order_intent SET status = ? WHERE id = ?", STATUS_EXPIRED, intent.id());
+        mapper.expireIntent(intent.id());
         return null;
     });
 }
@@ -222,71 +211,17 @@ private void validate(String idempotencyKey, CreateOrderRequest request) {
     }
 
     private OrderResponse findOrder(String customerId, String requestKey, String requestHash) {
-        List<Object[]> rows = jdbc.query(
-                "SELECT id, request_hash FROM takeout_order WHERE customer_id = ? AND request_key = ?",
-                (rs, rowNum) -> new Object[]{rs.getObject("id", UUID.class), rs.getString("request_hash")},
-                customerId, requestKey);
+        List<OrderKey> rows = mapper.findOrderKeyByCustomerAndRequest(customerId, requestKey);
         if (rows.isEmpty()) {
             return null;
         }
-        Object[] row = rows.get(0);
-        UUID orderId = (UUID) row[0];
-        String storedHash = (String) row[1];
+        OrderKey row = rows.getFirst();
+        UUID orderId = row.id();
+        String storedHash = row.requestHash();
         if (!java.util.Objects.equals(storedHash, requestHash)) {
             throw OrderProblem.idempotencyConflict();
         }
-        return loadOrder(orderId);
+        return mapper.loadOrder(orderId);
     }
 
-    private OrderResponse loadOrder(UUID id) {
-        List<OrderRow> rows = jdbc.query(
-                "select id, customer_id, status, total_cents, created_at, confirmed_at, cancelled_at "
-                        + "from takeout_order where id = ?",
-                ORDER_ROW_MAPPER, id);
-        if (rows.isEmpty()) {
-            return null;
-        }
-        OrderRow row = rows.get(0);
-        List<OrderItemResponse> items = jdbc.query(
-                "select menu_item_id, item_name, unit_price_cents, quantity from order_line where order_id = ? order by menu_item_id",
-                (rs, i) -> new OrderItemResponse(
-                        rs.getInt("menu_item_id"),
-                        rs.getString("item_name"),
-                        rs.getLong("unit_price_cents"),
-                        rs.getInt("quantity")),
-                id);
-        return new OrderResponse(row.id(), row.customerId(), row.status(), row.totalCents(), items,
-                row.createdAt(), row.confirmedAt(), row.cancelledAt());
-    }
-
-    private static Instant instant(ResultSet rs, String column) throws SQLException {
-        OffsetDateTime odt = rs.getObject(column, OffsetDateTime.class);
-        if (odt != null) {
-            return odt.toInstant();
-        }
-        Timestamp ts = rs.getTimestamp(column);
-        return ts == null ? null : ts.toInstant();
-    }
-
-    private record OrderRow(UUID id, String customerId, String status, long totalCents,
-                            Instant createdAt, Instant confirmedAt, Instant cancelledAt) {
-    }
-
-    private record IntentRow(UUID id, UUID orderId, String requestHash, String status) {
-    }
-
-    private static final RowMapper<OrderRow> ORDER_ROW_MAPPER = (rs, i) -> new OrderRow(
-            rs.getObject("id", UUID.class),
-            rs.getString("customer_id"),
-            rs.getString("status"),
-            rs.getLong("total_cents"),
-            instant(rs, "created_at"),
-            instant(rs, "confirmed_at"),
-            instant(rs, "cancelled_at"));
-
-    private static final RowMapper<IntentRow> INTENT_MAPPER = (rs, i) -> new IntentRow(
-            rs.getObject("id", UUID.class),
-            rs.getObject("order_id", UUID.class),
-            rs.getString("request_hash"),
-            rs.getString("status"));
 }

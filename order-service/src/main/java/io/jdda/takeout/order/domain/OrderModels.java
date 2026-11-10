@@ -1,4 +1,4 @@
-package io.jdda.takeout;
+package io.jdda.takeout.order.domain;
 
 import java.time.Instant;
 import java.util.List;

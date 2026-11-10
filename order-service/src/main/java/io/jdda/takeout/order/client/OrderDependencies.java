@@ -1,6 +1,6 @@
 package io.jdda.takeout.order.client;
 
-import io.jdda.takeout.OrderModels.OrderItemRequest;
+import io.jdda.takeout.order.domain.OrderModels.OrderItemRequest;
 import io.jdda.takeout.order.domain.OrderProblem;
 import java.time.Duration;
 import java.util.HashMap;
