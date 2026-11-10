@@ -45,98 +45,60 @@ public class OrderService {
     public record CreateResult(OrderResponse order, boolean created) {
     }
 
-    public CreateResult create(String idempotencyKey, CreateOrderRequest request) {
-        validate(idempotencyKey, request);
-        String customerId = request.customerId();
-        String hash = hash(request.items());
-
-        // Initial replay of an already committed order.
-        OrderResponse existing = findOrder(customerId, idempotencyKey);
-        if (existing != null) {
-            String storedHash = jdbc.queryForObject(
-                    "select request_hash from takeout_order where customer_id = ? and request_key = ?",
-                    String.class, customerId, idempotencyKey);
-            if (hash.equals(storedHash)) {
-                return new CreateResult(existing, false);
-            }
-            throw OrderProblem.idempotencyConflict();
-        }
-
-        // Durably claim the intent in autocommit so concurrent requests converge.
-        UUID intentId = UUID.randomUUID();
-        jdbc.update("insert into order_intent(id, order_id, customer_id, request_key, request_hash, status, created_at, updated_at) "
-                        + "values (?, null, ?, ?, ?, ?, clock_timestamp(), clock_timestamp()) "
-                        + "on conflict (customer_id, request_key) do nothing",
-                intentId, customerId, idempotencyKey, hash, STATUS_OPEN);
-
-        return tx.execute(status -> createLocked(customerId, idempotencyKey, hash, request));
+public CreateResult create(String idempotencyKey, CreateOrderRequest request) {
+    validate(idempotencyKey, request);
+    String customerId = request.customerId();
+    String requestHash = hash(request.items());
+    OrderResponse existing = findOrder(customerId, idempotencyKey);
+    if (existing != null) {
+        return new CreateResult(existing, false);
     }
-
-    private CreateResult createLocked(String customerId, String idempotencyKey, String hash, CreateOrderRequest request) {
-        IntentRow intent = jdbc.query(
-                "select id, order_id, request_hash, status from order_intent "
-                        + "where customer_id = ? and request_key = ? for update",
-                INTENT_MAPPER, customerId, idempotencyKey).stream().findFirst()
-                .orElseThrow(() -> OrderProblem.serviceUnavailable("intent missing"));
-
-        // Recheck actual customer+key inside the lock.
-        OrderResponse existing = findOrder(customerId, idempotencyKey);
-        if (existing != null) {
-            if (hash.equals(intent.requestHash())) {
-                return new CreateResult(existing, false);
-            }
+    UUID intentId = UUID.randomUUID();
+    jdbc.update("INSERT INTO order_intent(id, order_id, customer_id, request_key, request_hash, status, created_at) VALUES (?, ?, ?, ?, ?, ?, clock_timestamp()) ON CONFLICT(customer_id, request_key) DO NOTHING",
+            intentId, intentId, customerId, idempotencyKey, requestHash, STATUS_OPEN);
+    return tx.execute(status -> {
+        List<IntentRow> rows = jdbc.query("SELECT id, order_id, request_hash, status FROM order_intent WHERE customer_id = ? AND request_key = ? FOR UPDATE",
+                INTENT_MAPPER, customerId, idempotencyKey);
+        if (rows.isEmpty()) {
+            throw OrderProblem.serviceUnavailable("intent unavailable");
+        }
+        IntentRow intent = rows.get(0);
+        if (!requestHash.equals(intent.requestHash())) {
             throw OrderProblem.idempotencyConflict();
         }
-        if (!hash.equals(intent.requestHash())) {
+        OrderResponse replay = findOrder(customerId, idempotencyKey);
+        if (replay != null) {
+            return new CreateResult(replay, false);
+        }
+        if (!STATUS_OPEN.equals(intent.status())) {
             throw OrderProblem.idempotencyConflict();
         }
-        if (STATUS_EXPIRED.equals(intent.status())) {
-            throw OrderProblem.idempotencyConflict();
-        }
-
-        UUID orderId = intent.orderId() != null ? intent.orderId() : UUID.randomUUID();
-        if (intent.orderId() == null) {
-            jdbc.update("update order_intent set order_id = ?, updated_at = clock_timestamp() where id = ?",
-                    orderId, intent.id());
-        }
-
+        UUID orderId = intent.orderId();
         Map<Integer, OrderDependencies.MenuItem> menu = deps.fetchMenu();
-        List<OrderItemResponse> lines = new ArrayList<>();
+        List<OrderItemResponse> snapshots = new ArrayList<>();
         long total = 0L;
         for (OrderItemRequest item : request.items()) {
-            OrderDependencies.MenuItem mi = menu.get(item.menuItemId());
-            if (mi == null) {
+            OrderDependencies.MenuItem menuItem = menu.get(item.menuItemId());
+            if (menuItem == null) {
                 throw OrderProblem.menuItemNotFound();
             }
-            long lineTotal = mi.priceCents() * item.quantity();
+            long lineTotal = menuItem.priceCents() * item.quantity();
             total += lineTotal;
-            lines.add(new OrderItemResponse(mi.menuItemId(), mi.name(), mi.priceCents(), item.quantity()));
+            snapshots.add(new OrderItemResponse(item.menuItemId(), menuItem.name(), menuItem.priceCents(), item.quantity()));
         }
-
         deps.reserve(orderId, request.items());
-
-        jdbc.update("insert into takeout_order(id, customer_id, request_key, request_hash, status, total_cents) "
-                        + "values (?, ?, ?, ?, ?, ?)",
-                orderId, customerId, idempotencyKey, hash, "CONFIRMED", total);
-
-        for (OrderItemResponse line : lines) {
-            jdbc.update("insert into order_line(order_id, menu_item_id, item_name, unit_price_cents, quantity) "
-                            + "values (?, ?, ?, ?, ?)",
-                    orderId, line.menuItemId(), line.name(), line.unitPriceCents(), line.quantity());
+        jdbc.update("INSERT INTO takeout_order(id, customer_id, request_key, request_hash, status, total_cents) VALUES (?, ?, ?, ?, 'PENDING', ?)",
+                orderId, customerId, idempotencyKey, requestHash, total);
+        for (OrderItemResponse snapshot : snapshots) {
+            jdbc.update("INSERT INTO order_line(order_id, menu_item_id, item_name, unit_price_cents, quantity) VALUES (?, ?, ?, ?, ?)",
+                    orderId, snapshot.menuItemId(), snapshot.name(), snapshot.priceCents(), snapshot.quantity());
         }
-
-        jdbc.update("insert into outbox_event(event_id, order_id) values (?, ?)", UUID.randomUUID(), orderId);
-
-        jdbc.update("update order_intent set status = ?, updated_at = clock_timestamp() where id = ?",
-                STATUS_COMPLETED, intent.id());
-
-        OrderResponse response = findOrder(customerId, idempotencyKey);
-        if (response == null) {
-            throw OrderProblem.serviceUnavailable("order not visible after commit");
-        }
+        jdbc.update("INSERT INTO outbox_event(event_id, order_id) VALUES (?, ?)", UUID.randomUUID(), orderId);
+        jdbc.update("UPDATE order_intent SET status = ? WHERE id = ?", STATUS_COMPLETED, intent.id());
+        OrderResponse response = new OrderResponse(orderId, customerId, "PENDING", total, snapshots);
         return new CreateResult(response, true);
-    }
-
+    });
+}
     public OrderResponse get(UUID id) {
         OrderResponse order = loadOrder(id);
         if (order == null) {
@@ -145,53 +107,96 @@ public class OrderService {
         return order;
     }
 
-    public OrderResponse cancel(UUID id) {
-        Boolean cancelled = tx.execute(status -> {
-            OrderRow row = jdbc.query(
-                    "select id, customer_id, status from takeout_order where id = ? for update",
-                    ORDER_ROW_MAPPER, id).stream().findFirst().orElse(null);
-            if (row == null) {
-                throw OrderProblem.orderNotFound();
-            }
-            if ("CANCELLED".equals(row.status())) {
-                return false;
-            }
-            jdbc.update("update takeout_order set status = 'CANCELLED', cancelled_at = clock_timestamp() where id = ?", id);
-            jdbc.update("insert into order_release_retry(order_id, attempts, completed, created_at, updated_at) "
-                            + "values (?, 0, false, clock_timestamp(), clock_timestamp()) "
-                            + "on conflict (order_id) do nothing",
-                    id);
-            return true;
-        });
-
-        if (Boolean.TRUE.equals(cancelled)) {
-            try {
-                deps.release(id);
-                jdbc.update("update order_release_retry set completed = true, updated_at = clock_timestamp() where order_id = ?", id);
-            } catch (RuntimeException ignored) {
-                // Durable retry row remains; scheduler will retry.
-            }
+public OrderResponse cancel(UUID id) {
+    Boolean firstCancel = tx.execute(status -> {
+        List<String> statuses = jdbc.queryForList("SELECT status FROM takeout_order WHERE id = ? FOR UPDATE", String.class, id);
+        if (statuses.isEmpty()) {
+            throw OrderProblem.orderNotFound();
         }
-        return get(id);
-    }
-
-    private void validate(String idempotencyKey, CreateOrderRequest request) {
-        if (idempotencyKey == null || idempotencyKey.isBlank()) {
-            throw OrderProblem.badRequest("idempotency key required");
+        String current = statuses.get(0);
+        if ("CANCELLED".equals(current)) {
+            return Boolean.FALSE;
         }
-        if (request == null || request.customerId() == null || request.customerId().isBlank()) {
-            throw OrderProblem.badRequest("customer id required");
-        }
-        if (request.items() == null || request.items().isEmpty()) {
-            throw OrderProblem.badRequest("items required");
-        }
-        for (OrderItemRequest item : request.items()) {
-            if (item == null || item.menuItemId() <= 0 || item.quantity() <= 0) {
-                throw OrderProblem.badRequest("invalid item");
-            }
+        jdbc.update("UPDATE takeout_order SET status = 'CANCELLED', updated_at = clock_timestamp() WHERE id = ?", id);
+        jdbc.update("INSERT INTO order_release_retry(order_id, completed, created_at, updated_at) VALUES (?, FALSE, clock_timestamp(), clock_timestamp()) ON CONFLICT(order_id) DO NOTHING", id);
+        return Boolean.TRUE;
+    });
+    if (Boolean.TRUE.equals(firstCancel)) {
+        try {
+            release(id);
+        } catch (RuntimeException ignored) {
         }
     }
+    return get(id);
+}
 
+private void release(UUID orderId) {
+    deps.release(orderId);
+    jdbc.update("UPDATE order_release_retry SET completed = TRUE, updated_at = clock_timestamp() WHERE order_id = ?", orderId);
+}
+
+@org.springframework.scheduling.annotation.Scheduled(fixedDelay = 2000)
+public void retryReleases() {
+    List<UUID> pending = jdbc.queryForList("SELECT order_id FROM order_release_retry WHERE completed = FALSE ORDER BY created_at LIMIT 10", UUID.class);
+    for (UUID orderId : pending) {
+        try {
+            release(orderId);
+        } catch (RuntimeException ignored) {
+        }
+    }
+}
+
+@org.springframework.scheduling.annotation.Scheduled(fixedDelay = 60000)
+public void abandonStaleIntents() {
+    tx.execute(status -> {
+        List<IntentRow> rows = jdbc.query("SELECT id, order_id, request_hash, status FROM order_intent WHERE status = ? AND created_at < clock_timestamp() - INTERVAL '10 minutes' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED",
+                INTENT_MAPPER, STATUS_OPEN);
+        if (rows.isEmpty()) {
+            return null;
+        }
+        IntentRow intent = rows.get(0);
+        List<UUID> existing = jdbc.queryForList("SELECT id FROM takeout_order WHERE id = ?", UUID.class, intent.orderId());
+        if (!existing.isEmpty()) {
+            return null;
+        }
+        deps.release(intent.orderId());
+        jdbc.update("UPDATE order_intent SET status = ? WHERE id = ?", STATUS_EXPIRED, intent.id());
+        return null;
+    });
+}
+private void validate(String idempotencyKey, CreateOrderRequest request) {
+    if (idempotencyKey == null || !idempotencyKey.matches("[A-Za-z0-9._-]{1,128}")) {
+        throw OrderProblem.badRequest("invalid idempotency key");
+    }
+    if (request == null) {
+        throw OrderProblem.badRequest("request is required");
+    }
+    String customerId = request.customerId();
+    if (customerId == null || !customerId.matches("[A-Za-z0-9_-]{1,64}")) {
+        throw OrderProblem.badRequest("invalid customer id");
+    }
+    List<OrderItemRequest> items = request.items();
+    if (items == null || items.isEmpty() || items.size() > 20) {
+        throw OrderProblem.badRequest("items must contain between 1 and 20 entries");
+    }
+    java.util.Set<Integer> seen = new java.util.HashSet<>();
+    for (OrderItemRequest item : items) {
+        if (item == null) {
+            throw OrderProblem.badRequest("item is required");
+        }
+        int menuItemId = item.menuItemId();
+        if (menuItemId <= 0) {
+            throw OrderProblem.badRequest("invalid menu item id");
+        }
+        if (!seen.add(menuItemId)) {
+            throw OrderProblem.badRequest("duplicate menu item id");
+        }
+        int quantity = item.quantity();
+        if (quantity < 1 || quantity > 99) {
+            throw OrderProblem.badRequest("invalid quantity");
+        }
+    }
+}
     private static String hash(List<OrderItemRequest> items) {
         List<OrderItemRequest> sorted = new ArrayList<>(items);
         sorted.sort(Comparator.comparingInt(OrderItemRequest::menuItemId));
