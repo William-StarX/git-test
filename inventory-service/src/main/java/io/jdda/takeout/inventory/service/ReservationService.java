@@ -1,19 +1,19 @@
-package io.jdda.takeout.inventory.application;
+package io.jdda.takeout.inventory.service;
 
 import io.jdda.takeout.inventory.domain.StockContracts.ReservationItem;
 import io.jdda.takeout.inventory.domain.StockContracts.ReservationRequest;
 import io.jdda.takeout.inventory.domain.StockContracts.StockView;
+import io.jdda.takeout.inventory.mapper.InventoryMapper.ReservationRow;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
-import org.springframework.jdbc.core.JdbcTemplate;
+import io.jdda.takeout.inventory.mapper.InventoryMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -23,17 +23,14 @@ public class ReservationService {
     private static final String STATUS_RESERVED = "RESERVED";
     private static final String STATUS_RELEASED = "RELEASED";
 
-    private final JdbcTemplate jdbc;
+    private final InventoryMapper mapper;
 
-    public ReservationService(JdbcTemplate jdbc) {
-        this.jdbc = jdbc;
+    public ReservationService(InventoryMapper mapper) {
+        this.mapper = mapper;
     }
 
     public StockView getStock(long menuItemId) {
-        List<Integer> rows = jdbc.query(
-                "SELECT available FROM inventory.stock WHERE menu_item_id = ?",
-                (rs, n) -> rs.getInt(1),
-                menuItemId);
+        List<Integer> rows = mapper.findAvailableStock(menuItemId);
         if (rows.isEmpty()) {
             throw new InventoryException(HttpStatus.NOT_FOUND, "MENU_ITEM_NOT_FOUND",
                     "Menu item not found: " + menuItemId);
@@ -46,10 +43,7 @@ public class ReservationService {
         Map<Long, Integer> normalized = normalize(request.items());
         String hash = hash(normalized);
 
-        jdbc.update(
-                "INSERT INTO inventory.reservation (id, status, request_hash) VALUES (?, ?, ?) "
-                        + "ON CONFLICT (id) DO NOTHING",
-                reservationId, STATUS_RESERVED, hash);
+        mapper.insertReservationIfAbsent(reservationId, STATUS_RESERVED, hash);
 
         ReservationRow row = lockReservation(reservationId);
 
@@ -68,9 +62,7 @@ public class ReservationService {
                     "Reservation payload mismatch: " + reservationId);
         }
 
-        Integer lineCount = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM inventory.reservation_line WHERE reservation_id = ?",
-                Integer.class, reservationId);
+        Integer lineCount = mapper.countReservationLines(reservationId);
         if (lineCount != null && lineCount > 0) {
             // Already reserved with identical payload: idempotent success, no deduction.
             return;
@@ -79,14 +71,9 @@ public class ReservationService {
         for (Map.Entry<Long, Integer> entry : normalized.entrySet()) {
             long menuItemId = entry.getKey();
             int quantity = entry.getValue();
-            int updated = jdbc.update(
-                    "UPDATE inventory.stock SET available = available - ? "
-                            + "WHERE menu_item_id = ? AND available >= ?",
-                    quantity, menuItemId, quantity);
+            int updated = mapper.deductAvailableStock(menuItemId, quantity);
             if (updated == 0) {
-                Integer exists = jdbc.queryForObject(
-                        "SELECT COUNT(*) FROM inventory.stock WHERE menu_item_id = ?",
-                        Integer.class, menuItemId);
+                Integer exists = mapper.countMatchingStockItem(menuItemId);
                 if (exists == null || exists == 0) {
                     throw new InventoryException(HttpStatus.NOT_FOUND, "MENU_ITEM_NOT_FOUND",
                             "Menu item not found: " + menuItemId);
@@ -97,19 +84,13 @@ public class ReservationService {
         }
 
         for (Map.Entry<Long, Integer> entry : normalized.entrySet()) {
-            jdbc.update(
-                    "INSERT INTO inventory.reservation_line (reservation_id, menu_item_id, quantity) "
-                            + "VALUES (?, ?, ?)",
-                    reservationId, entry.getKey(), entry.getValue());
+            mapper.insertReservationLine(reservationId, entry.getKey(), entry.getValue());
         }
     }
 
     @Transactional
     public void release(UUID reservationId) {
-        jdbc.update(
-                "INSERT INTO inventory.reservation (id, status, request_hash) VALUES (?, ?, NULL) "
-                        + "ON CONFLICT (id) DO NOTHING",
-                reservationId, STATUS_RELEASED);
+        mapper.insertReleaseTombstoneIfAbsent(reservationId, STATUS_RELEASED);
 
         ReservationRow row = lockReservation(reservationId);
 
@@ -117,31 +98,17 @@ public class ReservationService {
             return;
         }
 
-        List<Map.Entry<Long, Integer>> lines = new ArrayList<>();
-        jdbc.query(
-                "SELECT menu_item_id, quantity FROM inventory.reservation_line "
-                        + "WHERE reservation_id = ? ORDER BY menu_item_id",
-                rs -> {
-                    lines.add(Map.entry(rs.getLong(1), rs.getInt(2)));
-                },
-                reservationId);
+        List<Map.Entry<Long, Integer>> lines = mapper.findReservedLinesInStockOrder(reservationId);
 
         for (Map.Entry<Long, Integer> line : lines) {
-            jdbc.update(
-                    "UPDATE inventory.stock SET available = available + ? WHERE menu_item_id = ?",
-                    line.getValue(), line.getKey());
+            mapper.restoreAvailableStock(line.getKey(), line.getValue());
         }
 
-        jdbc.update(
-                "UPDATE inventory.reservation SET status = ? WHERE id = ?",
-                STATUS_RELEASED, reservationId);
+        mapper.markReservationReleased(reservationId, STATUS_RELEASED);
     }
 
     private ReservationRow lockReservation(UUID reservationId) {
-        return jdbc.queryForObject(
-                "SELECT status, request_hash FROM inventory.reservation WHERE id = ? FOR UPDATE",
-                (rs, n) -> new ReservationRow(rs.getString(1), rs.getString(2)),
-                reservationId);
+        return mapper.lockReservationById(reservationId);
     }
 
     private static Map<Long, Integer> normalize(List<ReservationItem> items) {
@@ -167,9 +134,6 @@ public class ReservationService {
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 unavailable", e);
         }
-    }
-
-    private record ReservationRow(String status, String requestHash) {
     }
 
     public static class InventoryException extends RuntimeException {
