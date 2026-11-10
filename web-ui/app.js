@@ -137,10 +137,14 @@
   }
 
   function findMenu(id) {
-    for (var i = 0; i < state.menu.length; i++) if (state.menu[i].id === id) return state.menu[i];
+    const target = String(id);
+    for (let i = 0; i < state.menu.length; i++) {
+      if (String(state.menu[i].id) === target) {
+        return state.menu[i];
+      }
+    }
     return null;
   }
-
   function addToCart(id) {
     if (state.draft) return;
     var item = findMenu(id);
@@ -236,12 +240,17 @@
   }
 
   function buildBody() {
-    var items = Object.keys(state.cart).map(function (id) {
-      return { menuItemId: id, quantity: state.cart[id] };
+    const items = Object.keys(state.cart).map(function (cartKey) {
+      return {
+        menuItemId: Number(cartKey),
+        quantity: state.cart[cartKey]
+      };
     });
-    return { customerId: customerId(), items: items };
+    return {
+      customerId: customerId(),
+      items: items
+    };
   }
-
   function submitOrder() {
     if (state.posting) return;
     var draft = state.draft;
