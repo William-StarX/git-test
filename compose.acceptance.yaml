@@ -1,0 +1,4 @@
+services:
+  rabbitmq:
+    ports:
+      - "127.0.0.1:0:15672"

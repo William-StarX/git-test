@@ -1,0 +1,61 @@
+name: takeout-orders
+services:
+  app:
+    build: .
+    ports:
+      - "127.0.0.1:${TAKEOUT_PORT:-18090}:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/takeout
+      SPRING_DATASOURCE_USERNAME: takeout
+      SPRING_DATASOURCE_PASSWORD: ${TAKEOUT_DB_PASSWORD:-takeout-local-db}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_USERNAME: takeout
+      SPRING_RABBITMQ_PASSWORD: ${TAKEOUT_MQ_PASSWORD:-takeout-local-mq}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:18-alpine@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395
+    environment:
+      POSTGRES_DB: takeout
+      POSTGRES_USER: takeout
+      POSTGRES_PASSWORD: ${TAKEOUT_DB_PASSWORD:-takeout-local-db}
+    volumes:
+      - pg-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U takeout -d takeout"]
+      interval: 2s
+      timeout: 3s
+      retries: 25
+
+  redis:
+    image: redis:7.4-alpine@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine@sha256:4841f6384ef8313c3594cd3f2e9f40c10805f8a61c45f08a9a5d9ddea8199267
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: takeout
+      RABBITMQ_DEFAULT_PASS: ${TAKEOUT_MQ_PASSWORD:-takeout-local-mq}
+    volumes:
+      - mq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 4s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  pg-data:
+  mq-data:
