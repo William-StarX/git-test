@@ -1,24 +1,109 @@
 name: takeout-orders
+
 services:
   app:
-    build: .
+    build:
+      context: ./web-ui
+      dockerfile: Dockerfile
+    image: takeout-orders/web-ui:0.1.0
     ports:
       - "127.0.0.1:${TAKEOUT_PORT:-18090}:8080"
+    depends_on:
+      order-service:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+      menu-service:
+        condition: service_healthy
+    restart: unless-stopped
+
+  order-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        MODULE: order-service
+    image: takeout-orders/order-service:0.1.0
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/takeout
       SPRING_DATASOURCE_USERNAME: takeout
       SPRING_DATASOURCE_PASSWORD: ${TAKEOUT_DB_PASSWORD:-takeout-local-db}
-      SPRING_DATA_REDIS_HOST: redis
       SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: "5672"
       SPRING_RABBITMQ_USERNAME: takeout
       SPRING_RABBITMQ_PASSWORD: ${TAKEOUT_MQ_PASSWORD:-takeout-local-mq}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: "6379"
+      MENU_BASE_URL: http://menu-service:8080
+      INVENTORY_BASE_URL: http://inventory-service:8080
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
       rabbitmq:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    restart: unless-stopped
+
+  inventory-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        MODULE: inventory-service
+    image: takeout-orders/inventory-service:0.1.0
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/takeout
+      SPRING_DATASOURCE_USERNAME: takeout
+      SPRING_DATASOURCE_PASSWORD: ${TAKEOUT_DB_PASSWORD:-takeout-local-db}
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: "5672"
+      SPRING_RABBITMQ_USERNAME: takeout
+      SPRING_RABBITMQ_PASSWORD: ${TAKEOUT_MQ_PASSWORD:-takeout-local-mq}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: "6379"
+    depends_on:
+      order-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    restart: unless-stopped
+
+  menu-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        MODULE: menu-service
+    image: takeout-orders/menu-service:0.1.0
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/takeout
+      SPRING_DATASOURCE_USERNAME: takeout
+      SPRING_DATASOURCE_PASSWORD: ${TAKEOUT_DB_PASSWORD:-takeout-local-db}
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: "5672"
+      SPRING_RABBITMQ_USERNAME: takeout
+      SPRING_RABBITMQ_PASSWORD: ${TAKEOUT_MQ_PASSWORD:-takeout-local-mq}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: "6379"
+    depends_on:
+      order-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    restart: unless-stopped
 
   postgres:
     image: postgres:18-alpine@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395
@@ -30,17 +115,21 @@ services:
       - pg-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U takeout -d takeout"]
-      interval: 2s
-      timeout: 3s
-      retries: 25
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
 
   redis:
     image: redis:7.4-alpine@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 2s
-      timeout: 3s
-      retries: 15
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
 
   rabbitmq:
     image: rabbitmq:4-management-alpine@sha256:4841f6384ef8313c3594cd3f2e9f40c10805f8a61c45f08a9a5d9ddea8199267
@@ -52,9 +141,11 @@ services:
       - mq-data:/var/lib/rabbitmq
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 4s
-      timeout: 5s
-      retries: 20
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
 
 volumes:
   pg-data:
