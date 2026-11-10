@@ -1,9 +1,9 @@
-package io.jdda.takeout.order.api;
+package io.jdda.takeout.order.controller;
 
-import io.jdda.takeout.OrderModels.CreateOrderRequest;
-import io.jdda.takeout.OrderModels.ErrorResponse;
-import io.jdda.takeout.OrderModels.OrderResponse;
-import io.jdda.takeout.order.application.OrderService;
+import io.jdda.takeout.order.domain.OrderModels.CreateOrderRequest;
+import io.jdda.takeout.order.domain.OrderModels.ErrorResponse;
+import io.jdda.takeout.order.domain.OrderModels.OrderResponse;
+import io.jdda.takeout.order.service.OrderService;
 import io.jdda.takeout.order.domain.OrderProblem;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -24,13 +24,13 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 @RequestMapping("/api/orders")
-public class OrderApi {
+public class OrderController {
 
     private static final String IDEMPOTENCY_KEY_PATTERN = "[A-Za-z0-9._-]{1,128}";
 
     private final OrderService orderService;
 
-    public OrderApi(OrderService orderService) {
+    public OrderController(OrderService orderService) {
         this.orderService = orderService;
     }
 
