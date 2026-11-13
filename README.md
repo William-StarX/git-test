@@ -1,93 +1,100 @@
-# 外卖点单平台（takeout-platform）
+# 外卖点单演示<br>Takeout ordering demo
 
-本仓库由四个相互独立的模块组成，通过根 Maven 聚合器与 Docker Compose 统一打包和部署。
+在本地跑通浏览菜单、加入购物车、提交订单、查询与取消订单。项目包含前端、订单、菜单和库存四个模块，使用 Docker Compose 一起启动。
 
-## 模块与打包
+Run a local flow from browsing the menu and filling a cart to placing, looking up, and cancelling an order. Docker Compose starts the frontend, order, menu, and inventory modules together.
 
-| 模块 | 说明 | 打包方式 |
-| --- | --- | --- |
-| `order-service` | 订单服务，负责下单、订单查询与库存补偿编排 | Maven（Spring Boot 可执行 jar） |
-| `inventory-service` | 库存服务，负责库存扣减与回补 | Maven（Spring Boot 可执行 jar） |
-| `menu-service` | 菜单服务，负责菜品与库存展示 | Maven（Spring Boot 可执行 jar） |
-| `web-ui` | 前端静态页面与反向代理 | 独立 Nginx 模块，不参与 Maven 构建 |
+## 快速开始<br>Quick start
 
-根 `pom.xml` 为 `io.jdda:takeout-platform:0.1.0`，`packaging` 为 `pom`，继承 Spring Boot 父工程 `3.5.16`，`java.version` 为 `21`，`flyway.version` 为 `11.20.3`，聚合 `order-service`、`inventory-service`、`menu-service` 三个模块。`web-ui` 为独立的 Nginx 模块，Maven 不依赖它。
+准备 Git 和支持 Compose 的 Docker，启动 Linux 容器引擎后执行：
 
-每个 Java 模块都可以单独构建：
+Install Git and Docker with Compose support, start the Linux container engine, and run:
 
-```bash
-mvn -f order-service/pom.xml package
-mvn -f inventory-service/pom.xml package
-mvn -f menu-service/pom.xml package
+```sh
+git clone https://github.com/William-StarX/MultiAgent-test.git
+cd MultiAgent-test
+docker compose up -d --build --wait
 ```
 
-产物为各模块 `target/<module>-0.1.0.jar`。
+服务就绪后，打开 [本地点单页面](http://127.0.0.1:18090/)。Java 编译和依赖服务都由容器处理。
 
-## 镜像构建
+Once the services are ready, open the [local ordering page](http://127.0.0.1:18090/). Containers handle Java compilation and the supporting services.
 
-根目录 `Dockerfile` 为多阶段构建，通过 `ARG MODULE` 选择模块：
+## 试一次下单<br>Try an order
 
-```bash
-docker build --build-arg MODULE=order-service -t takeout-orders/order-service:0.1.0 .
-docker build --build-arg MODULE=inventory-service -t takeout-orders/inventory-service:0.1.0 .
-docker build --build-arg MODULE=menu-service -t takeout-orders/menu-service:0.1.0 .
-docker build -t takeout-orders/web-ui:0.1.0 ./web-ui
-```
+1. 在菜单中选择菜品，加入购物车并调整数量。
 
-构建阶段使用固定摘要的 `maven:3.9.11-eclipse-temurin-21`，运行阶段使用固定摘要的 `eclipse-temurin:21-jre`，以非 root 用户 `10001` 运行。
+   Choose items from the menu, add them to the cart, and adjust quantities.
 
-`web-ui/Dockerfile` 基于官方 `nginx:1.28-alpine`，将 `nginx.conf` 复制为 `conf.d/default.conf`，并将 `index.html`、`styles.css`、`app.js` 复制到 html 目录，监听 `8080`。
+2. 点击“提交订单”，保存页面显示的订单号。
 
-## 网关路由
+   Click “提交订单” (Place order) and keep the order ID shown on the page.
 
-Nginx 仅提供同源访问，并设置安全的 CSP 与安全响应头，不使用内联 JS：
+3. 在“查询订单”中输入订单号查看状态；符合条件的订单会显示取消按钮。
 
-- `/` 返回静态资源；
-- 精确 `/api/menu` 转发到 `menu-service:8080`；
-- `/api/menu/{id}/stock` 转发到 `inventory-service:8080`；
-- `/api/orders` 及其子路径转发到 `order-service:8080`；
-- 精确 `/actuator/health` 转发到 `order-service`；
-- `/internal` 与未识别的 `/api` 路由返回 404。
+   Enter the ID under “查询订单” (Look up order) to check its status. Eligible orders show a cancel button.
 
-代理保持原始 URI 不变，并透传 `X-Cache`。使用 Docker 内置 DNS 解析器，服务端点被替换后可重新解析。
+也可以直接检查接口。健康接口应返回 `UP`，菜单和订单接口返回 JSON：
 
-## 组合部署
+You can also check the endpoints directly. The health endpoint should return `UP`; the menu and order endpoints return JSON:
 
-`compose.yaml` 项目名为 `takeout-orders`，包含 `app`、`order-service`、`inventory-service`、`menu-service`、`postgres`、`redis`、`rabbitmq`。仅 `app` 暴露宿主机端口 `127.0.0.1:${TAKEOUT_PORT:-18090}:8080`（端口设为 0 也可用），三个 Java 服务仅在内部 `8080` 通信。
-
-- 数据库：主机 `postgres`，库/用户 `takeout`，密码 `TAKEOUT_DB_PASSWORD`，默认 `takeout-local-db`；
-- 消息队列：主机 `rabbitmq`，主机名 `rabbitmq`，用户 `takeout`，密码 `TAKEOUT_MQ_PASSWORD`，默认 `takeout-local-mq`；
-- 缓存：主机 `redis`；
-- 订单服务通过 `MENU_BASE_URL=http://menu-service:8080` 与 `INVENTORY_BASE_URL=http://inventory-service:8080` 访问下游。
-
-数据卷 `pg-data` 挂载到 `/var/lib/postgresql`，`mq-data` 挂载到 `/var/lib/rabbitmq`，不会删除数据。
-
-健康检查：Postgres 使用 `pg_isready`，Redis 使用 `redis-cli ping`，RabbitMQ 使用 `rabbitmq-diagnostics -q ping`。订单服务在 Postgres 与 RabbitMQ 健康后启动；菜单与库存服务在订单服务 `/actuator/health` 为 UP 后启动，以保证其一次性迁移所需的 V1 已存在；`app` 在三个服务健康后启动。服务健康检查使用 `curl`（Temurin Ubuntu 基础镜像自带），重试次数充足。
-
-## 快速开始
-
-```bash
-docker compose up -d --build
-```
-
-访问 `http://127.0.0.1:18090/`（或自定义 `TAKEOUT_PORT`）。
-
-## 库存补偿
-
-库存扣减与回补通过消息队列异步完成，补偿逻辑具备持久化能力，服务重启后仍可继续处理未完成的补偿，避免库存长期不一致。
-
-## 本地演示范围
-
-本项目面向本地演示与验收，使用 Compose 在单机拉起全部四个模块，不涉及生产环境的身份与权限能力。
-
-## 验收
-
-保留的受保护验收入口 `scripts/acceptance.py` 与 `.github/workflows/acceptance.yml`、`compose.acceptance.yaml` 保持不变。验收脚本通过 Compose 的 `app` 服务 `8080` 端口访问，使用 `exec postgres` 操作数据库，并会停止 `redis` 与 `rabbitmq` 以验证补偿行为，脚本无需修改即可运行。
-
-也可用 curl 做基础验证：
-
-```bash
+```sh
 curl -fsS http://127.0.0.1:18090/actuator/health
 curl -fsS http://127.0.0.1:18090/api/menu
 curl -fsS http://127.0.0.1:18090/api/orders
 ```
+
+## 查看状态、更改端口与停止<br>Status, port settings, and shutdown
+
+查看服务状态和日志，或停止当前演示：
+
+Inspect service status and logs, or stop the demo:
+
+```sh
+docker compose ps
+docker compose logs --tail=100 order-service
+docker compose down
+```
+
+`docker compose down` 保留数据库和消息队列的数据卷。要更换页面端口，在仓库根目录的 `.env` 中设置 `TAKEOUT_PORT=18091`，再执行启动命令，并访问新端口。数据库和消息队列密码可分别通过 `TAKEOUT_DB_PASSWORD`、`TAKEOUT_MQ_PASSWORD` 设置。
+
+`docker compose down` keeps the database and message-queue volumes. To change the web port, set `TAKEOUT_PORT=18091` in a `.env` file at the repository root, run the startup command again, and visit the new port. Set database and message-queue passwords with `TAKEOUT_DB_PASSWORD` and `TAKEOUT_MQ_PASSWORD`.
+
+## 运行验收<br>Run acceptance checks
+
+安装 Python 3 后，在仓库根目录执行以下命令。脚本建立独立的 Compose 环境，检查下单、重复提交、取消和故障恢复，并将结果写入 `target/acceptance.json`。
+
+With Python 3 installed, run the command from the repository root. The script creates a separate Compose environment, checks ordering, repeated submissions, cancellation, and failure recovery, and writes results to `target/acceptance.json`.
+
+```sh
+python scripts/acceptance.py
+```
+
+## 项目特点与源码入口<br>Features and source entry points
+
+- **一次启动完整演示。** Nginx 提供页面和统一 API 入口，Compose 同时准备 PostgreSQL、Redis 和 RabbitMQ。
+
+  **Start the whole demo together.** Nginx serves the page and a shared API entry point, while Compose prepares PostgreSQL, Redis, and RabbitMQ.
+
+- **覆盖下单后的恢复流程。** 前端保留未完成的提交草稿并使用幂等键；库存补偿持久化，便于检查重试和服务恢复后的行为。
+
+  **Exercise recovery after an order.** The frontend retains pending submission drafts and uses idempotency keys. Inventory compensation is persisted so retries and service recovery can be checked.
+
+| 入口<br>Entry | 用途<br>Purpose |
+|---|---|
+| [web-ui](web-ui/) | 点单页面与 Nginx 路由<br>Ordering page and Nginx routing |
+| [order-service](order-service/) | 下单、查询与取消<br>Order placement, lookup, and cancellation |
+| [menu-service](menu-service/) | 菜单与库存展示<br>Menu and stock display |
+| [inventory-service](inventory-service/) | 库存扣减与回补<br>Stock deductions and compensation |
+| [compose.yaml](compose.yaml) | 服务、端口和依赖配置<br>Services, ports, and dependencies |
+| [验收脚本](scripts/acceptance.py)<br>[Acceptance script](scripts/acceptance.py) | 完整验收流程<br>Acceptance workflow |
+
+单独开发 Java 模块时，使用 JDK 21 和 Maven，例如 `mvn -f order-service/pom.xml package`。Spring Boot 等依赖见 [根 POM](pom.xml)，镜像构建方式见 [Dockerfile](Dockerfile)。
+
+For individual Java modules, use JDK 21 and Maven, for example `mvn -f order-service/pom.xml package`. See the [root POM](pom.xml) for Spring Boot and other dependencies, and the [Dockerfile](Dockerfile) for image builds.
+
+## 注意事项<br>Attention
+
+本项目用于本地演示与验收，默认通过回环地址访问。对外部署时需要配置正式的身份认证、访问权限和凭据。
+
+This project is intended for local demos and acceptance checks, with loopback access by default. External deployment requires appropriate authentication, access controls, and credentials.
